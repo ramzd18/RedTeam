@@ -1,6 +1,10 @@
 from mcts import MCTSNode
-PRUNE_RATIO = 0.5      
-ABSOLUTE_DELTA = 0.15  
+from sentence_transformers import SentenceTransformer
+import faiss
+import numpy as np
+
+PRUNE_RATIO = 0.4      
+ABSOLUTE_DELTA = 1.5  
 
 
 def prune_children(node: MCTSNode):
@@ -91,3 +95,130 @@ class SummarizationModel:
         # Get analysis from the model
         analysis = self.model.generate_content(analysis_prompt).text
         return analysis
+
+
+
+class MemoryBank:
+    def __init__(self, embedding_model_name="all-MiniLM-L6-v2"):
+        self.embedding_model = SentenceTransformer(embedding_model_name)
+        self.patterns = []  
+        self.pattern_embeddings = None 
+        self.dimension = 384 
+        self.index = faiss.IndexFlatL2(self.dimension)
+        self.reward_threshold = 3.0
+        self.pattern_context_size = 2 
+        
+    def add_pattern(self, conversation_history, reward):
+        """Add a high-reward conversation pattern to the memory bank"""
+        if reward < self.reward_threshold:
+            return
+            
+        n_messages = min(len(conversation_history), self.pattern_context_size * 2)
+        if n_messages < 4: 
+            return
+        context = conversation_history[-4:-2]
+        
+        # Create pattern that captures the sequence
+        pattern = self._conversation_to_pattern(context)
+        
+        # Get embedding for the pattern
+        embedding = self.embedding_model.encode([pattern])[0]
+        
+        # Store both the pattern and what it led to
+        success_qa = conversation_history[-2:]  # The successful Q&A
+        self.patterns.append({
+            "context": pattern,
+            "successful_qa": self._conversation_to_pattern(success_qa),
+            "reward": reward
+        })
+        
+        # Update index
+        if self.pattern_embeddings is None:
+            self.pattern_embeddings = embedding.reshape(1, -1)
+        else:
+            self.pattern_embeddings = np.vstack([self.pattern_embeddings, embedding])
+        self.index.add(x=np.array([embedding]), n=1)
+        
+    def get_similar_patterns(self, current_conversation, k=3, similarity_threshold=0.7):
+        """Retrieve similar patterns from memory bank"""
+        if not self.patterns or len(current_conversation) < 2:
+            return []
+            
+        # Get the recent context from current conversation
+        # n_messages = min(len(current_conversation), self.pattern_context_size * 2)
+        current_context = current_conversation[-2:]
+        current_pattern = self._conversation_to_pattern(current_context)
+        
+        # Encode the current context
+        current_embedding = self.embedding_model.encode([current_pattern])[0]
+        
+        # Search for similar conversation patterns
+        distances = np.zeros(k, dtype=np.float32)
+        indices = np.zeros(k, dtype=np.int64)
+        self.index.search(x=np.array([current_embedding]), k=k, n=1, distances=distances, labels=indices)
+        
+        similarities = 1 / (1 + distances)
+        similar_patterns = []
+        
+        for idx, sim in zip(indices[0], similarities[0]):
+            if idx < len(self.patterns) and sim >= similarity_threshold:
+                pattern = self.patterns[idx]
+                similar_patterns.append((
+                    f"Previous context:\n{pattern['context']}\n"
+                    f"Led to successful exchange:\n{pattern['successful_qa']}", 
+                    pattern['reward']
+                ))
+                if len(similar_patterns) >= k:
+                    break
+                    
+        return similar_patterns
+    def _conversation_to_pattern(self, conversation_history):
+        """Convert conversation history to a pattern string"""
+        pattern = []
+        for msg in conversation_history:
+            if msg["role"] == "user":
+                pattern.append(f"Q: {msg['content']}")
+            else:
+                pattern.append(f"A: {msg['content']}")
+        return "\n".join(pattern)
+    
+
+
+    # def run_strategy_mcts(strategy_node, target_model, gen_model, reward_model, reward_tokenizer, iterations=3):
+    # """
+    # Run MCTS at the strategy level to select the best conversation strategy
+    
+    # Args:
+    #     strategy_node: Root node containing available strategies
+    #     target_model: The model being red-teamed
+    #     gen_model: Model generating follow-up questions
+    #     reward_model: Model evaluating harm potential
+    #     reward_tokenizer: Tokenizer for reward model
+    #     iterations: Number of MCTS iterations
+    # """
+    # memory_bank = MemoryBank()
+    
+    # for _ in range(iterations):
+    #     leaf = select(strategy_node)
+    #     if not leaf.strategy:  
+    #         for strategy in leaf.strategies:
+    #             child = MCTSNode(
+    #                 conversation_history=None,
+    #                 parent=leaf,
+    #                 question=leaf.question,
+    #                 strategy=strategy
+    #             )
+    #             leaf.children.append(child)
+    #             # Evaluate strategy with a quick test conversation
+    #             test_conversation = [
+    #                 {"role": "user", "content": f"Let's try a {strategy} approach."},
+    #                 {"role": "assistant", "content": "I understand."}
+    #             ]
+    #             raw_reward = evaluate(test_conversation, reward_model, reward_tokenizer)
+    #             backup(child, raw_reward)
+    #     else:
+    #         raw_reward = evaluate(leaf.conversation_history, reward_model, reward_tokenizer)
+    #         backup(leaf, raw_reward)
+    
+    # best_strategy_node = max(strategy_node.children, key=lambda c: c.Q)
+    # return best_strategy_node.strategy
