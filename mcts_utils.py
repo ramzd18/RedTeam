@@ -1,11 +1,86 @@
-from mcts import MCTSNode
+# from mcts import MCTSNode
 from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
-
+import math
 PRUNE_RATIO = 0.4      
 ABSOLUTE_DELTA = 1.5  
 
+
+class MCTSNode:
+    def __init__(self, conversation_history=None, parent=None, question=None, strategy=None, strategies=None):
+        # Store the entire conversation history as a list of messages
+        self.conversation_history = conversation_history if conversation_history else []
+        self.parent = parent
+        self.children = []
+        self.question = question if question else (self.parent.question if self.parent else None)
+        self.N = 0  # Visit count
+        self.W = 0.0  # Total value
+        self.Q = 0.0  # Average value
+        self.P = 1.0  # Prior probability
+        self.strategy = strategy 
+        
+    def add_message(self, role, content):
+        """Add a new message to the conversation history"""
+        new_history = self.conversation_history.copy()
+        new_history.append({"role": role, "content": content})
+        return new_history
+        
+    def get_last_response(self):
+        """Get the last assistant response from the conversation"""
+        for msg in reversed(self.conversation_history):
+            if msg["role"] == "assistant":
+                return msg["content"]
+        return None
+        
+    def get_full_prompt(self):
+        """Convert conversation history to a formatted prompt"""
+        formatted = ""
+        for msg in self.conversation_history:
+            if msg["role"] == "user":
+                formatted += f"Human: {msg['content']}\n"
+            else:
+                formatted += f"Assistant: {msg['content']}\n"
+        return formatted
+
+    def get_compressed_history(self, window_size=3):
+        """Get a compressed version of the conversation history for the target model"""
+        if len(self.conversation_history) <= window_size * 2:
+            return self.get_full_prompt()
+        
+        compressed = ""
+        
+        if self.conversation_history:
+            compressed += f"Human: {self.conversation_history[0]['content']}\n"
+            if len(self.conversation_history) > 1:
+                compressed += f"Assistant: {self.conversation_history[1]['content']}\n"
+        
+        middle_history = self.conversation_history[2:-2]
+        for i in range(0, len(middle_history), 2):
+            if i+1 < len(middle_history):
+                compressed += f"Human: {middle_history[i]['content']}\n"
+                compressed += "Assistant: [Answer compressed for space]\n"
+        
+        last_exchange = self.conversation_history[-2:]
+        if len(last_exchange) >= 2:
+            compressed += f"Human: {last_exchange[0]['content']}\n"
+            compressed += f"Assistant: {last_exchange[1]['content']}\n"
+        
+        return compressed
+
+    def get_generation_context(self, window_size=2):
+        """Get context for the generation model with key information"""
+        context = ""
+        for msg in self.conversation_history:
+            if msg["role"] == "user":
+                context += f"Question Asked: {msg['content']}\n"
+        return context
+
+    def uct_score(self):
+        """Calculate UCT score for node selection"""
+        if self.N == 0:
+            return float('inf')
+        return self.Q + math.sqrt(2 * math.log(self.parent.N) / self.N)
 
 def prune_children(node: MCTSNode):
     """
@@ -113,7 +188,8 @@ class MemoryBank:
         if reward < self.reward_threshold:
             return
             
-        n_messages = min(len(conversation_history), self.pattern_context_size * 2)
+        # n_messages = min(len(conversation_history), self.pattern_context_size * 2)
+        n_messages = len(conversation_history)
         if n_messages < 4: 
             return
         context = conversation_history[-4:-2]
@@ -124,8 +200,7 @@ class MemoryBank:
         # Get embedding for the pattern
         embedding = self.embedding_model.encode([pattern])[0]
         
-        # Store both the pattern and what it led to
-        success_qa = conversation_history[-2:]  # The successful Q&A
+        success_qa = conversation_history[-2:]  
         self.patterns.append({
             "context": pattern,
             "successful_qa": self._conversation_to_pattern(success_qa),
@@ -137,7 +212,7 @@ class MemoryBank:
             self.pattern_embeddings = embedding.reshape(1, -1)
         else:
             self.pattern_embeddings = np.vstack([self.pattern_embeddings, embedding])
-        self.index.add(x=np.array([embedding]), n=1)
+        self.index.add(x=np.array([embedding]))
         
     def get_similar_patterns(self, current_conversation, k=3, similarity_threshold=0.7):
         """Retrieve similar patterns from memory bank"""
@@ -155,7 +230,7 @@ class MemoryBank:
         # Search for similar conversation patterns
         distances = np.zeros(k, dtype=np.float32)
         indices = np.zeros(k, dtype=np.int64)
-        self.index.search(x=np.array([current_embedding]), k=k, n=1, distances=distances, labels=indices)
+        self.index.search(x=np.array([current_embedding]), k=k, distances=distances, labels=indices)
         
         similarities = 1 / (1 + distances)
         similar_patterns = []
