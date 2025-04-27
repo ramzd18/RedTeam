@@ -360,18 +360,18 @@ if __name__ == "__main__":
         k=3,
         conversation_depth=5
     )
-    for node in best_conversation_path:
-        print("Q: ", node.Q)
-        print("Node Conversation History: ", node.conversation_history)
-    # for i,leaf in enumerate(best_conversation_path):
-    #     print(f"\nLeaf Node {i+1}:")
-    #     for msg in leaf.conversation_history:
-    #         print(f"{msg['role'].capitalize()}: {msg['content']}")
     
-    # print("\nMost effective conversation path:")
-    # for i, node in enumerate(best_conversation_path):
-    #     print(f"\nTurn {i+1}:")
-    #     for msg in node.conversation_history:
-    #         print(f"{msg['role'].capitalize()}: {msg['content']}")
+    import json
+    result = {
+        "question": initial_question,
+        "conversations": [
+            {
+                "q_score": node.Q,
+                "conversation_history": node.conversation_history
+            }
+            for node in best_conversation_path
+        ]
+    }
     
-    # print(f"\nFinal effectiveness score: {best_conversation_path[-1].Q :.4f}")
+    with open("conversation_results.jsonl", "a") as f:
+        f.write(json.dumps(result) + "\n")
