@@ -1,2 +1,2 @@
 # RedTeam
-Adversarial latent training but opposite
+Adverial multi turn conversation jailbreaking with MCTS
